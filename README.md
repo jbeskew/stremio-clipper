@@ -18,6 +18,8 @@ Everything runs **locally on your PC**. There are no accounts, API keys or cloud
 - Git (or just download the repo as a ZIP)
 
 ## Install (you)
+> This repo is private. You need to be added as a collaborator and be signed in to GitHub (for example with `gh auth login` or GitHub Desktop) to clone it.
+
 1. Get the code:
    ```powershell
    git clone https://github.com/jbeskew/stremio-clipper.git
