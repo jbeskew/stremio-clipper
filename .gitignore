@@ -1,0 +1,15 @@
+# Your saved clips
+stremio clips/
+*.mp4
+*.mkv
+
+# Debug dumps can contain stream URLs with tokens (debrid/addon links)
+helper/debug-dump.json
+*.log
+
+# Local/dev-only
+diag/
+.claude/
+.env
+.env.*
+node_modules/
