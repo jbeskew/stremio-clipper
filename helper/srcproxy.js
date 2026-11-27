@@ -15,7 +15,7 @@ const MAX_UP = 2;
 const sleep = (ms) => new Promise((z) => setTimeout(z, ms));
 
 function create({ port, resolveSrc }) {
-  const dir = path.join(os.tmpdir(), 'stremio-clipper-cache');
+  const dir = path.join(os.tmpdir(), 'stremio-clipper-cache-' + port);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
   fs.mkdirSync(dir, { recursive: true });
 

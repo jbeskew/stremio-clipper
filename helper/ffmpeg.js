@@ -98,7 +98,7 @@ async function probe(url) {
     fps: parseRate(v.avg_frame_rate) || parseRate(v.r_frame_rate) || 24,
     codec: v.codec_name, duration, videoKbps: Math.round(videoKbps || 0),
     audio: audio.map((s, i) => ({ index: i, codec: s.codec_name, lang: s.tags && s.tags.language, title: s.tags && s.tags.title, channels: s.channels, default: !!(s.disposition && s.disposition.default) })),
-    subtitles: subs.map((s, i) => ({ index: i, codec: s.codec_name, lang: s.tags && s.tags.language, title: s.tags && s.tags.title })),
+    subtitles: subs.map((s, i) => ({ index: i, streamIndex: s.index, codec: s.codec_name, lang: s.tags && s.tags.language, title: s.tags && s.tags.title })),
     encoder
   };
 }
@@ -124,17 +124,40 @@ function download(url, dest) {
   });
 }
 
-// Build ass file shifted so that t=0 is the clip start. Returns true on success.
+// Shift every cue of an ASS file by delta seconds. A cue that began before the clip start comes out of the extraction
+// with a negative time ("0:00:-1.-70"), which libass can't read: starts below 0 are clamped to 0 and cues that ended
+// at or before 0 are dropped.
+function shiftAss(file, delta) {
+  const sec = (t) => { const m = /^(-?\d+):(-?\d+):(-?\d+)\.(-?\d+)$/.exec(t.trim()); return m ? +m[1] * 3600 + +m[2] * 60 + +m[3] + (+m[4] / 100) : null; };
+  const pad = (n) => String(n).padStart(2, '0');
+  const fmt = (x) => { const c = Math.round(x * 100); return Math.floor(c / 360000) + ':' + pad(Math.floor(c / 6000) % 60) + ':' + pad(Math.floor(c / 100) % 60) + '.' + pad(c % 100); };
+  const out = fs.readFileSync(file, 'utf8').split(/\r?\n/).map((line) => {
+    const m = /^(Dialogue: [^,]*,)([^,]*),([^,]*),(.*)$/.exec(line);
+    if (!m) return line;
+    const a = sec(m[2]), b = sec(m[3]);
+    if (a == null || b == null) return line;
+    if (b + delta <= 0) return null;
+    return m[1] + fmt(Math.max(0, a + delta)) + ',' + fmt(b + delta) + ',' + m[4];
+  }).filter((l) => l !== null);
+  fs.writeFileSync(file, out.join('\n'));
+}
+
+// Build an ass file whose t=0 is the clip start. sub.offset (seconds, + = later) shifts the cues so a track that is timed for
+// another cut of the episode can be lined up by hand. Returns true on success.
 async function prepareSubs(sub, url, start, dur, tmp) {
   const out = path.join(tmp, 'sub.ass');
+  const offset = Number(sub.offset) || 0;
+  // cue time in the source = clip time + start - offset: read a window around that (1 s margin for cues that straddle an edge)
+  const s0 = Math.max(0, start - offset - 1), win = dur + 2;
   try {
     if (sub.type === 'external') {
       const raw = path.join(tmp, 'sub_raw.srt');
       await download(sub.url, raw);
-      await run(tools.ffmpeg, ['-y', '-v', 'error', '-ss', String(start), '-i', raw, '-t', String(dur), out], 30000);
+      await run(tools.ffmpeg, ['-y', '-v', 'error', '-ss', String(s0), '-i', raw, '-t', String(win), out], 30000);
     } else if (sub.type === 'embedded') {
-      await run(tools.ffmpeg, ['-y', '-v', 'error', '-ss', String(start), '-i', url, '-t', String(dur), '-map', '0:s:' + sub.index, out], 120000);
+      await run(tools.ffmpeg, ['-y', '-v', 'error', '-ss', String(s0), '-i', url, '-t', String(win), '-map', '0:s:' + sub.index, out], 120000);
     }
+    if (fs.existsSync(out)) shiftAss(out, s0 - start + offset);
     return fs.existsSync(out) && fs.statSync(out).size > 0;
   } catch (e) {
     return false;
@@ -264,4 +287,48 @@ async function grab(url, t, o) {
 }
 function clampNum(v, a, b) { v = Number(v); if (!isFinite(v)) v = a; return Math.min(Math.max(v, a), b); }
 
-module.exports = { tools, probe, encodeClip, grab, getEncoder: () => encoder };
+// ---- subtitle auto-sync: line an addon track up with the file's own (embedded) track ----
+// Addon tracks are timed for some other cut of the episode, and the gap changes between ad breaks, so the offset is measured
+// locally: identical lines in both tracks near the clip give ref_time - addon_time.
+function parseCues(text) {
+  const toS = (h, m, s, f) => +h * 3600 + +m * 60 + +s + +('0.' + f);
+  const re = /(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)[^\r\n]*\r?\n([\s\S]*?)(?:\r?\n\s*\r?\n|$)/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(text))) {
+    const t = m[9].replace(/<[^>]*>|\{[^}]*\}/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (t.length >= 8) out.push({ a: toS(m[1], m[2], m[3], m[4]), t });
+  }
+  return out;
+}
+const median = (xs) => { const s = xs.slice().sort((p, q) => p - q), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
+
+// opts: {url (stream), subUrl (addon srt), refIndex (embedded subtitle index), start, end}. Returns { offset, matches } (offset null if unsure).
+async function syncOffset(opts) {
+  if (!tools) throw new Error('ffmpeg not found');
+  const w0 = Math.max(0, opts.start - 90), w1 = opts.end + 90;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'stremio-sync-'));
+  try {
+    const raw = path.join(tmp, 'addon_raw.srt');
+    await download(opts.subUrl, raw);
+    const srt = path.join(tmp, 'addon_norm.srt');
+    await run(tools.ffmpeg, ['-y', '-v', 'error', '-i', raw, srt], 30000); // any format ffmpeg reads -> srt
+    const addon = parseCues(fs.readFileSync(srt, 'utf8'));
+    const refText = await run(tools.ffmpeg, ['-v', 'error', '-ss', String(w0), '-i', opts.url, '-t', String(w1 - w0), '-map', '0:s:' + opts.refIndex, '-f', 'srt', 'pipe:1'], 120000);
+    const ref = parseCues(refText).map((c) => ({ a: c.a + w0, t: c.t }));
+    const diffs = [];
+    for (const r of ref) {
+      let best = null;
+      for (const c of addon) if (c.t === r.t && Math.abs(c.a - r.a) < 40 && (!best || Math.abs(c.a - r.a) < Math.abs(best.a - r.a))) best = c;
+      if (best) diffs.push(r.a - best.a);
+    }
+    if (diffs.length < 3) return { offset: null, matches: diffs.length };
+    const med = median(diffs), good = diffs.filter((d) => Math.abs(d - med) <= 0.5);
+    if (good.length < 3) return { offset: null, matches: good.length };
+    return { offset: Math.round(median(good) * 10) / 10, matches: good.length };
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
+module.exports = { tools, probe, encodeClip, grab, syncOffset, getEncoder: () => encoder };

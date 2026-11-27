@@ -16,7 +16,7 @@
   const FPS_OPTIONS = [60, 50, 30, 25, 24, 15];
   const BITRATE_CEIL = { 360: 1400, 480: 2800, 720: 5500, 1080: 10000, 1440: 14000, 2160: 25000 };
   const U = (c) => String.fromCharCode(c);
-  const DASH = U(0x2014), ELLIP = U(0x2026), APPROX = U(0x2248), CHECK = U(0x2713);
+  const MINUS = U(0x2212), DASH = U(0x2014), ELLIP = U(0x2026), APPROX = U(0x2248), CHECK = U(0x2713);
   const DEFAULT_LEN = 30;
   const MIN_LEN = 1;
 
@@ -43,11 +43,15 @@
     return hr ? hr + ':' + pad2(m) + ':' + pad2(s) : m + ':' + pad2(s);
   }
   function parseTime(str) {
-    const parts = String(str).trim().split(':').map(Number);
-    if (!parts.length || parts.some((n) => !isFinite(n))) return null;
+    const raw = String(str).trim().replace(/,/g, '.').split(':');
+    // "15:50:7" is min:sec:tenths (a typo for 15:50.7): h:mm:ss always has a 2-digit seconds field
+    let tenths = 0;
+    if (raw.length === 3 && /^\d$/.test(raw[2])) { tenths = Number(raw[2]) / 10; raw.pop(); }
+    const parts = raw.map(Number);
+    if (!parts.length || parts.some((n) => !isFinite(n) || raw.indexOf('') >= 0)) return null;
     let t = 0;
     for (const p of parts) t = t * 60 + p;
-    return t;
+    return t + tenths;
   }
   function fmtSize(bytes) {
     const mb = bytes / 1e6;
@@ -123,16 +127,47 @@
     return t.slice(0, 100);
   }
 
+  // state.subtitles is a list of addon responses: [{ request, content: { type:'Ready', content:[{id,url,lang}] } }].
+  // Walk it generically so a slightly different shape still works.
   function collectExternalSubs(state) {
-    const out = [];
-    const subs = state && state.subtitles;
-    const lists = Array.isArray(subs) ? subs : subs ? [subs] : [];
-    for (const l of lists) {
-      const content = l && (Array.isArray(l.content) ? l.content : Array.isArray(l) ? l : null);
-      if (!content) continue;
-      for (const s of content) if (s && s.url) out.push({ type: 'external', url: s.url, lang: s.lang || s.id || 'sub', label: s.label });
-    }
+    const out = [], seen = new Set();
+    (function walk(n, depth, addon) {
+      if (!n || typeof n !== 'object' || depth > 5) return;
+      if (Array.isArray(n)) { n.forEach((x) => walk(x, depth + 1, addon)); return; }
+      if (typeof n.url === 'string' && /^https?:/i.test(n.url) && (n.lang || n.id || n.label)) {
+        if (!seen.has(n.url)) { seen.add(n.url); out.push({ type: 'external', url: n.url, lang: n.lang || n.id || 'sub', label: n.label || n.origin || addon || '' }); }
+        return;
+      }
+      let host = ''; try { host = n.request && n.request.base ? new URL(n.request.base).hostname : ''; } catch (_) {}
+      const name = (n.addon && n.addon.manifest && n.addon.manifest.name) || host || addon;
+      for (const k of ['content', 'subtitles']) if (n[k]) walk(n[k], depth + 1, name);
+    })(state && state.subtitles, 0, '');
     return out;
+  }
+
+  // Which subtitle track is the player showing right now? Under the Stremio shell (libmpv) the answer is mpv's track-list,
+  // read over the same chrome.webview channel the shell uses. Resolves null when unavailable (e.g. Stremio Enhanced),
+  // { none: true } when subtitles are off, else { external, ffIndex, lang, title, file }.
+  // Addon subtitle files are timed for the episode in general, not for this release, so the track in use (often the
+  // file's own embedded one) is the only one guaranteed to line up with the video.
+  function playerSubTrack() {
+    const wv = window.chrome && window.chrome.webview;
+    if (!wv) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let done = false, timer = 0;
+      const finish = (v) => { if (done) return; done = true; clearTimeout(timer); try { wv.removeEventListener('message', onMsg); } catch (_) {} resolve(v); };
+      function onMsg(e) {
+        let j = e.data;
+        if (typeof j === 'string') { try { j = JSON.parse(j); } catch (_) { return; } }
+        const a = j && j.args;
+        if (!a || a[0] !== 'mpv-prop-change' || !a[1] || a[1].name !== 'track-list' || !Array.isArray(a[1].data)) return;
+        const t = a[1].data.find((x) => x.type === 'sub' && x.selected);
+        finish(t ? { external: !!t.external, ffIndex: t['ff-index'], lang: t.lang || '', title: t.title || '', file: t['external-filename'] || '' } : { none: true });
+      }
+      timer = setTimeout(() => finish(null), 1500);
+      wv.addEventListener('message', onMsg);
+      try { wv.postMessage(JSON.stringify({ id: 0, type: 6, args: ['mpv-observe-prop', 'track-list'] })); } catch (_) { finish(null); }
+    });
   }
 
   /* ---------- styles ---------- */
@@ -180,6 +215,10 @@
   .clp-sw i:after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .15s}
   .clp-sw.on i{background:#ffd400}.clp-sw.on i:after{left:18px}
   .clp-sw.dis{opacity:.4;pointer-events:none}
+  .clp-off{display:none;align-items:center;gap:6px;font-size:13px}
+  .clp-off .clp-btn{padding:6px 10px}
+  .clp-off .clp-time{width:78px}
+  .clp-offt{font-size:11px;color:#ffd400;min-width:50px}
   .clp-status{margin-top:12px;font-size:13px;min-height:18px}
   .clp-status.err{color:#ff7b7b}
   .clp-prog{height:6px;background:rgba(255,255,255,.12);border-radius:3px;margin-top:8px;overflow:hidden}
@@ -267,7 +306,7 @@
       video, T, D: video.duration && isFinite(video.duration) ? video.duration : 0,
       start: Math.max(0, T - DEFAULT_LEN), end: T, zs: 0, ze: 0,
       probe: null, state: null, url: null,
-      height: 0, fps: 0, subs: [], subOn: false, subIdx: 0, audioIndex: 0,
+      height: 0, fps: 0, subs: [], subOn: false, subIdx: 0, subOffsets: {}, subAuto: {}, subSyncing: false, audioIndex: 0,
       previewing: false, saving: false, job: null, raf: 0,
       parked: true, mark: null, seeking: false, shownT: T, rate: 1, origRate: video.playbackRate || 1, fsExitAt: 0
     };
@@ -335,8 +374,15 @@
     const ddF = Dropdown(() => { S.fps = ddF.value; refresh(); });
     const elSize = h('div', 'clp-size', DASH);
     const sw = h('div', 'clp-sw dis', '<i></i><span>Subtitles</span>');
-    const ddS = Dropdown(() => { S.subIdx = ddS.value; checkDirty(); });
+    const ddS = Dropdown(() => { S.subIdx = ddS.value; syncOffUI(); checkDirty(); if (S.subOn) { onAudioChange(); autoSync(S.subIdx, false); } }); // the preview has subtitles baked in: rebuild it
     ddS.el.style.display = 'none';
+    // subtitle offset (+ = later): fine-tune a track that is timed for another cut; each change rebuilds the preview
+    const elOff = h('div', 'clp-off', '<span class="clp-lbl">Offset</span><button class="clp-btn" data-d="-1" title="Subtitles earlier (Shift: 1 s)">&minus;</button><input class="clp-time" value="0.0 s" title="Seconds; + shows subtitles later"><button class="clp-btn" data-d="1" title="Subtitles later (Shift: 1 s)">+</button><button class="clp-btn" data-auto="1" title="Measure the offset against the file own subtitle track">Auto</button><span class="clp-offt"></span>');
+    const elOffI = elOff.querySelector('input'), elOffT = elOff.querySelector('.clp-offt');
+    elOff.querySelectorAll('button').forEach((b) => b.addEventListener('click', (e) => { if (b.dataset.auto) autoSync(S.subIdx, true); else setOff(curOff() + (b.dataset.d === '1' ? 1 : -1) * (e.shiftKey ? 1 : 0.1), false); }));
+    const applyOffInput = () => { const v = parseFloat(String(elOffI.value).split(MINUS).join('-')); if (isFinite(v)) setOff(v, false); else syncOffUI(); };
+    elOffI.addEventListener('change', applyOffInput);
+    elOffI.addEventListener('keydown', (e) => { if (e.key === 'Enter') { applyOffInput(); elOffI.blur(); } });
     // preview speed (affects only the preview, never the exported clip)
     const ddR = Dropdown((v) => setRate(v));
     ddR.setOptions([0.5, 1, 1.25, 1.5, 2].map((v) => ({ value: v, label: v + 'x', sub: '' })));
@@ -347,7 +393,7 @@
     const ddA = Dropdown((v) => { S.audioIndex = v; onAudioChange(); checkDirty(); });
     const lblA = h('span', 'clp-lbl', 'Audio');
     ddA.el.style.display = 'none'; lblA.style.display = 'none';
-    r2.append(lblQ, ddQ.el, elSize, lblF, ddF.el, lblA, ddA.el, h('span', 'clp-grow'), sw, ddS.el);
+    r2.append(lblQ, ddQ.el, elSize, lblF, ddF.el, lblA, ddA.el, h('span', 'clp-grow'), sw, ddS.el, elOff);
     const btnCancel = h('button', 'clp-btn', 'Cancel');
     const btnSave = h('button', 'clp-btn primary', 'Save Clip');
     btnSave.disabled = true;
@@ -668,14 +714,53 @@
       if (!S.url || S.saving || closed || proxyReady()) return;
       pxTimer = setTimeout(buildProxy, delay == null ? 800 : delay);
     }
+    // subtitles are burned into the preview file exactly like the export, so timing follows the chosen track
+    function previewSub() {
+      const sub = S.subOn && S.subs[S.subIdx] ? S.subs[S.subIdx] : null;
+      return sub ? { type: sub.type, url: sub.url, index: sub.index, codec: sub.codec, offset: curOff() } : null;
+    }
+    // ----- subtitle offset -----
+    function curOff() { return S.subOffsets[S.subIdx] || 0; }
+    function syncOffUI() {
+      elOff.style.display = S.subOn && S.subs.length ? 'flex' : 'none';
+      const v = curOff();
+      elOffI.value = (v >= 0 ? '+' : MINUS) + Math.abs(v).toFixed(1) + ' s';
+      elOffT.textContent = S.subSyncing ? 'syncing' + ELLIP : S.subAuto[S.subIdx] ? 'auto' : '';
+    }
+    function setOff(v, auto) {
+      v = Math.round(clamp(v, -120, 120) * 10) / 10;
+      if (v === curOff() && !!S.subAuto[S.subIdx] === !!auto) { syncOffUI(); return; }
+      S.subOffsets[S.subIdx] = v; S.subAuto[S.subIdx] = !!auto;
+      syncOffUI(); checkDirty();
+      if (S.subOn) onAudioChange();
+    }
+    // Addon tracks are timed for some other cut of the episode (the gap even changes between ad breaks), so measure the offset
+    // against the file's own subtitle track around the clip. Quietly does nothing when there's no such track to compare with.
+    async function autoSync(idx, force) {
+      const sub = S.subs[idx];
+      if (!sub || sub.type !== 'external' || !S.url || S.subSyncing || (!force && S.subOffsets[idx] !== undefined)) return;
+      const l2 = (x) => String(x || '').slice(0, 2).toLowerCase();
+      const bad = /signs|songs|forced|commentary/i;
+      const ref = S.subs.find((s) => s.type === 'embedded' && l2(s.lang) === l2(sub.lang) && !bad.test(s.label || ''));
+      if (!ref) { if (force) elOffT.textContent = 'no reference'; return; }
+      S.subSyncing = true; syncOffUI();
+      try {
+        const r = await api('/subsync', { url: S.url, subUrl: sub.url, refIndex: ref.index, start: S.start, end: S.end }, 90000);
+        if (closed) return;
+        S.subSyncing = false;
+        if (r && r.offset != null && S.subIdx === idx) setOff(r.offset, true);
+        else if (force) { syncOffUI(); elOffT.textContent = 'no match'; }
+      } catch (_) { if (force && !closed) elOffT.textContent = 'sync failed'; }
+      S.subSyncing = false; if (!closed) { scheduleProxy(200); const t = elOffT.textContent; syncOffUI(); if (/^(no match|sync failed|no reference)$/.test(t)) elOffT.textContent = t; }
+    }
     async function buildProxy() {
-      if (closed || !S.probe || S.saving || S.px.status === 'preparing' || proxyReady()) return;
+      if (closed || !S.probe || S.saving || S.px.status === 'preparing' || proxyReady() || (S.subSyncing && S.subOn)) return; // wait for the subtitle sync: it decides what gets burned in
       clearTimeout(pxTimer);
       const ps = S.start, pe = S.end, token = ++pxToken, d = dur();
       S.px = { status: 'preparing', ps, pe, progress: 0, msg: '' }; updateBusy();
       try {
         const hh = Math.min(S.probe.height, d > 240 ? 480 : 720), kb = hh >= 720 ? 3200 : 1600;
-        const { id } = await api('/preview', { url: S.url, start: ps, end: pe, height: hh, videoKbps: kb, audioIndex: S.audioIndex });
+        const { id } = await api('/preview', { url: S.url, start: ps, end: pe, height: hh, videoKbps: kb, audioIndex: S.audioIndex, subtitle: previewSub() });
         if (token !== pxToken || closed) { api('/preview/' + id + '/cancel', {}).catch(() => {}); return; }
         pxId = id;
         for (;;) {
@@ -892,7 +977,8 @@
     // --- subtitles switch ---
     sw.addEventListener('click', () => {
       S.subOn = !S.subOn; sw.classList.toggle('on', S.subOn);
-      ddS.el.style.display = S.subOn && S.subs.length > 1 ? '' : 'none'; checkDirty();
+      ddS.el.style.display = S.subOn && S.subs.length > 1 ? '' : 'none'; syncOffUI(); checkDirty(); onAudioChange();
+      if (S.subOn) autoSync(S.subIdx, false);
     });
 
     // --- close / key handling ---
@@ -931,7 +1017,7 @@
     });
 
     // after a save, any edit puts the panel back into "ready to save a new clip" mode
-    const editSig = () => [elTitle.value.trim(), S.start.toFixed(2), S.end.toFixed(2), S.height, S.fps, S.audioIndex, S.subOn ? 'S' + S.subIdx : '-'].join('|');
+    const editSig = () => [elTitle.value.trim(), S.start.toFixed(2), S.end.toFixed(2), S.height, S.fps, S.audioIndex, S.subOn ? 'S' + S.subIdx + ':' + curOff() : '-'].join('|');
     function checkDirty() {
       if (S.savedSig && !S.saving && editSig() !== S.savedSig) resetToEdit();
     }
@@ -959,7 +1045,7 @@
         const { id } = await api('/clip', {
           url: S.url, start: S.start, end: S.end, title: elTitle.value.trim() || 'Clip', stamp: elTitle.value.trim() === S.defTitle,
           height: S.height, fps: S.fps, srcFps: S.probe.fps, videoKbps: kbpsFor(S.height, S.fps),
-          audioIndex: S.audioIndex, subtitle: sub ? { type: sub.type, url: sub.url, index: sub.index, codec: sub.codec } : null
+          audioIndex: S.audioIndex, subtitle: sub ? { type: sub.type, url: sub.url, index: sub.index, codec: sub.codec, offset: curOff() } : null
         });
         S.job = id;
         for (;;) {
@@ -1018,19 +1104,33 @@
       S.height = probe.height; S.fps = probe.fps;
       S.qualityList = QUALITIES.filter((q) => q < probe.height); S.qualityList.unshift(probe.height);
       S.fpsList = FPS_OPTIONS.filter((f) => f < probe.fps - 0.5); S.fpsList.unshift(probe.fps);
-      // subtitles: addon (external) first, then embedded
-      S.subs = collectExternalSubs(state).concat((probe.subtitles || []).map((s) => ({ type: 'embedded', index: s.index, codec: s.codec, lang: s.lang || '', label: s.title })));
+      // subtitles: the file's own (embedded) tracks first, then addon (external) ones
+      S.subs = (probe.subtitles || []).map((s) => ({ type: 'embedded', index: s.index, streamIndex: s.streamIndex, codec: s.codec, lang: s.lang || '', label: s.title }))
+        .concat(collectExternalSubs(state));
+      const pl = await playerSubTrack();
+      let playerIdx = -1;
+      if (pl && !pl.none) {
+        if (!pl.external) playerIdx = S.subs.findIndex((s) => s.type === 'embedded' && s.streamIndex === pl.ffIndex);
+        else {
+          const fn = pl.file;
+          playerIdx = S.subs.findIndex((s) => s.type === 'external' && fn && (fn === s.url || fn.indexOf(s.url) >= 0 || s.url.indexOf(fn) >= 0));
+          if (playerIdx < 0 && /^https?:/i.test(fn)) { S.subs.push({ type: 'external', url: fn, lang: pl.lang || 'sub', label: 'player' }); playerIdx = S.subs.length - 1; }
+        }
+      }
       if (S.subs.length) {
-        // prefer a full English track; skip "Signs & Songs", forced, and commentary tracks
+        // default: the track the player is showing; else a full English track (skip "Signs & Songs", forced, commentary)
         const text = (s) => (s.label || '') + ' ' + (s.lang || '');
         const good = S.subs.map((s, i) => i).filter((i) => !/signs|songs|forced|commentary/i.test(text(S.subs[i])));
         const pool = good.length ? good : S.subs.map((s, i) => i);
         const en = pool.find((i) => /(^|\s)(en|eng|english)/i.test(text(S.subs[i])));
-        S.subIdx = en != null ? en : pool[0];
-        ddS.setOptions(S.subs.map((s, i) => ({ value: i, label: (s.label || s.lang || 'Track ' + (i + 1)) + (s.type === 'embedded' ? ' (embedded)' : ''), sub: '' })));
+        S.subIdx = playerIdx >= 0 ? playerIdx : en != null ? en : pool[0];
+        let ext = 0;
+        ddS.setOptions(S.subs.map((s, i) => ({ value: i, label: (s.type === 'external' ? (s.lang || 'sub') + ' #' + (++ext) + (s.label ? ' - ' + s.label : '') : (s.lang || 'Track ' + (i + 1)) + (s.label ? ' - ' + s.label : '') + ' (embedded)') + (i === playerIdx ? ' (player)' : ''), sub: '' })));
         ddS.setValue(S.subIdx);
         sw.classList.remove('dis');
-        
+        if (playerIdx >= 0) { S.subOn = true; sw.classList.add('on'); ddS.el.style.display = S.subs.length > 1 ? '' : 'none'; } // the player shows subtitles: so does the clip
+        syncOffUI();
+        if (S.subOn) autoSync(S.subIdx, false);
       } else { sw.title = 'No subtitle tracks available for this stream'; }
       await setupAudio(probe.audio || []);
       setStatus('');

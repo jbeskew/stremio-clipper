@@ -223,6 +223,14 @@ const server = http.createServer(async (req, res) => {
         return send(res, 500, { error: cleanErr(e) });
       }
     }
+    if (req.method === 'POST' && url.pathname === '/subsync') {
+      const b = await readBody(req);
+      if (!validUrl(b.url) || !validUrl(b.subUrl)) return send(res, 400, { error: 'bad url' });
+      const start = Number(b.start), end = Number(b.end), refIndex = Number(b.refIndex);
+      if (!(start >= 0) || !(end > start) || !(refIndex >= 0)) return send(res, 400, { error: 'bad range' });
+      try { return send(res, 200, await ff.syncOffset({ url: proxy.srcFor(b.url), subUrl: b.subUrl, refIndex, start, end })); }
+      catch (e) { return send(res, 200, { offset: null, matches: 0, error: cleanErr(e) }); }
+    }
     if (req.method === 'POST' && url.pathname === '/preview') {
       const b = await readBody(req);
       if (!validUrl(b.url)) return send(res, 400, { error: 'bad url' });
@@ -236,7 +244,7 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       ff.encodeClip({
         url: proxy.srcFor(b.url), start, end, height: clampN(b.height, 240, 1080, 720), fps: 0, srcFps: 0,
-        videoKbps: clampN(b.videoKbps, 400, 8000, 3000), audioIndex: clampN(b.audioIndex, 0, 32, 0), subtitle: null, outFile
+        videoKbps: clampN(b.videoKbps, 400, 8000, 3000), audioIndex: clampN(b.audioIndex, 0, 32, 0), subtitle: (b.subtitle && (b.subtitle.type === 'embedded' || (b.subtitle.type === 'external' && validUrl(b.subtitle.url)))) ? b.subtitle : null, outFile
       }, job).then(() => {
         job.status = 'done'; job.progress = 1;
         note('preview(' + Math.round(end - start) + 's)', Date.now() - t0);
