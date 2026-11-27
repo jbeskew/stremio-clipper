@@ -68,24 +68,36 @@ function hop(u) {
     r.on('timeout', () => { r.destroy(); resolve({ error: true }); });
   });
 }
+const sleep = (ms) => new Promise((z) => setTimeout(z, ms));
+// Returns { url, ok }. ok=false means the final hop answered with an error status (rate limit, expired link, ...).
 async function followRedirects(u) {
-  let cur = u;
+  let cur = u, bad = 0;
   for (let n = 0, waited = 0; n < 8; n++) {
     const r = await hop(cur);
-    if (r.error) return cur;
+    if (r.error) return { url: cur, ok: false };
     if (r.status >= 300 && r.status < 400 && r.loc) { cur = new URL(r.loc, cur).toString(); continue; }
-    if (r.status === 429 && r.retryAfter && waited + r.retryAfter <= 70) { waited += r.retryAfter; await new Promise((z) => setTimeout(z, (r.retryAfter + 1) * 1000)); n--; continue; }
-    return cur;
+    if (r.status === 429 && r.retryAfter && waited + r.retryAfter <= 70) { waited += r.retryAfter; await sleep((r.retryAfter + 1) * 1000); n--; continue; }
+    // Transient errors (429 with no Retry-After, 5xx): back off briefly and try this hop again.
+    if ((r.status === 429 || r.status >= 500) && bad < 3) { bad++; await sleep(1500 * bad); n--; continue; }
+    return { url: cur, ok: r.status > 0 && r.status < 400 };
   }
-  return cur;
+  return { url: cur, ok: false };
 }
-function resolveSrc(u) {
+function resolveSrc(u, fresh) {
   const hit = resolveCache.get(u);
-  if (hit && Date.now() - hit.at < RESOLVE_TTL) return hit.p;
-  const p = followRedirects(u).catch(() => u);
+  if (!fresh && hit && Date.now() - hit.at < RESOLVE_TTL) return hit.p;
+  const p = followRedirects(u).catch(() => ({ url: u, ok: false })).then((r) => {
+    // Don't keep a dead link around: the next request resolves again.
+    if (!r.ok && resolveCache.get(u) && resolveCache.get(u).p === p) resolveCache.delete(u);
+    return r.url;
+  });
   resolveCache.set(u, { p, at: Date.now() });
   if (resolveCache.size > 50) resolveCache.delete(resolveCache.keys().next().value);
   return p;
+}
+// Error text goes to the UI (and screenshots), so never show stream URLs: they carry debrid tokens.
+function cleanErr(e) {
+  return String((e && e.message) || e).replace(/https?:\/\/\S+/g, '<stream>');
 }
 
 function inClips(f) {
@@ -177,8 +189,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/probe') {
       const { url: src } = await readBody(req);
       if (!validUrl(src)) return send(res, 400, { error: 'bad url' });
-      try { return send(res, 200, await ff.probe(await resolveSrc(src))); }
-      catch (e) { return send(res, 500, { error: String(e.message || e) }); }
+      // A 4xx from the CDN is usually a rate limit or a stale/used link: re-resolve from the original URL and retry.
+      let lastErr;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try { return send(res, 200, await ff.probe(await resolveSrc(src, attempt > 0))); }
+        catch (e) {
+          lastErr = e;
+          if (!/Server returned (4|5)XX|HTTP error|Server returned 4\d\d|Server returned 5\d\d/i.test(String(e.message))) break;
+          await sleep(1500 * (attempt + 1));
+        }
+      }
+      return send(res, 500, { error: cleanErr(lastErr) });
     }
     if (req.method === 'POST' && (url.pathname === '/thumb' || url.pathname === '/frame')) {
       const isFrame = url.pathname === '/frame';
@@ -196,7 +217,7 @@ const server = http.createServer(async (req, res) => {
         return res.end(buf);
       } catch (e) {
         if (ac.signal.aborted) return;
-        return send(res, 500, { error: String(e.message || e) });
+        return send(res, 500, { error: cleanErr(e) });
       }
     }
     if (req.method === 'POST' && url.pathname === '/preview') {
@@ -217,7 +238,7 @@ const server = http.createServer(async (req, res) => {
         job.status = 'done'; job.progress = 1;
         note('preview(' + Math.round(end - start) + 's)', Date.now() - t0);
       }).catch((e) => {
-        job.status = job.cancelled ? 'cancelled' : 'error'; job.error = String(e.message || e);
+        job.status = job.cancelled ? 'cancelled' : 'error'; job.error = cleanErr(e);
         try { fs.unlinkSync(outFile); } catch (_) {}
       });
       return send(res, 200, { id });
@@ -254,7 +275,7 @@ const server = http.createServer(async (req, res) => {
         job.status = 'done'; job.progress = 1; job.notes = r.notes; job.encoder = r.encoder;
         try { job.size = fs.statSync(outFile).size; } catch (_) {}
       }).catch((e) => {
-        job.status = job.cancelled ? 'cancelled' : 'error'; job.error = String(e.message || e);
+        job.status = job.cancelled ? 'cancelled' : 'error'; job.error = cleanErr(e);
         try { fs.unlinkSync(outFile); } catch (_) {}
       });
       return send(res, 200, { id });
@@ -286,7 +307,7 @@ const server = http.createServer(async (req, res) => {
     }
     send(res, 404, { error: 'not found' });
   } catch (e) {
-    send(res, 500, { error: String(e.message || e) });
+    send(res, 500, { error: cleanErr(e) });
   }
 });
 
