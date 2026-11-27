@@ -13,3 +13,15 @@ diag/
 .env
 .env.*
 node_modules/
+
+# Privacy: secrets, local state, keys, logs
+.state/
+logs/
+config.json
+*.pem
+*.key
+id_rsa*
+*.sqlite
+*.db
+helper/*.json.bak
+stremio-clipper-cache/

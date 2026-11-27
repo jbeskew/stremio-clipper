@@ -40,3 +40,6 @@ Not yet verified in real Stremio after the proxy-preview rewrite: filmstrip spee
 - An Enhanced 1.2.1 update popup appears on reload. It was left alone; updating could affect plugin loading.
 - Fixes found while testing in the real app: a global-CSS clash hid the dropdown menus, solved by rendering the panel in a Shadow DOM. Keep new UI inside the shadow root.
 - `helper/debug-dump.json` is written only when `localStorage.clipper_debug = '1'`; it can contain stream URLs with tokens, so don't share it.
+
+## Privacy guard
+Before any commit or push, a pre-push privacy guard runs. Never bypass it (--no-verify, editing or deleting the hook, core.hooksPath); if it blocks, fix the commit and report what it caught.
