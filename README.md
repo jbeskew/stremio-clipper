@@ -20,7 +20,7 @@ Everything runs **locally on your PC**. There are no accounts, API keys or cloud
 ## Install (you)
 1. Get the code:
    ```powershell
-   git clone https://github.com/<OWNER>/stremio-clipper.git
+   git clone https://github.com/jbeskew/stremio-clipper.git
    cd stremio-clipper
    ```
    (No Git? Click **Code > Download ZIP** on GitHub, unzip it somewhere permanent, and open PowerShell in that folder. Don't delete the folder afterwards: the helper runs from it.)
@@ -37,7 +37,7 @@ Clips are saved to the `stremio clips` folder inside the repo folder.
 ## Install (with Claude Code)
 Open Claude Code in an empty folder and paste this:
 
-> Clone https://github.com/\<OWNER\>/stremio-clipper into this folder, read its README.md and CLAUDE.md, then install it for me: check I have Node.js and Stremio (or ffmpeg) installed, run `install.ps1`, confirm the helper is up with `Invoke-RestMethod http://127.0.0.1:47811/health`, and tell me the final manual step in Stremio Enhanced. Don't change any files outside this folder except what `install.ps1` does.
+> Clone https://github.com/\<jbeskew\>/stremio-clipper into this folder, read its README.md and CLAUDE.md, then install it for me: check I have Node.js and Stremio (or ffmpeg) installed, run `install.ps1`, confirm the helper is up with `Invoke-RestMethod http://127.0.0.1:47811/health`, and tell me the final manual step in Stremio Enhanced. Don't change any files outside this folder except what `install.ps1` does.
 
 Claude will do the setup and tell you to enable the plugin in Stremio Enhanced (that step is in the app UI).
 
