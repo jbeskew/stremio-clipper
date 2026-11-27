@@ -100,6 +100,8 @@ function cleanErr(e) {
   return String((e && e.message) || e).replace(/https?:\/\/\S+/g, '<stream>');
 }
 
+const proxy = require("./srcproxy").create({ port: PORT, resolveSrc });
+
 function inClips(f) {
   const r = path.resolve(f);
   return r.startsWith(CLIPS_DIR + path.sep) && fs.existsSync(r);
@@ -182,9 +184,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   const url = new URL(req.url, 'http://127.0.0.1');
+  if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/src/')) return origin ? send(res, 403, { error: 'local only' }) : proxy.handle(req, res);
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
-      return send(res, 200, { ok: true, ffmpeg: !!ff.tools, encoder: ff.getEncoder(), clipsDir: CLIPS_DIR, perf });
+      return send(res, 200, { ok: true, ffmpeg: !!ff.tools, encoder: ff.getEncoder(), clipsDir: CLIPS_DIR, perf, upstream: proxy.stats });
     }
     if (req.method === 'POST' && url.pathname === '/probe') {
       const { url: src } = await readBody(req);
@@ -192,7 +195,7 @@ const server = http.createServer(async (req, res) => {
       // A 4xx from the CDN is usually a rate limit or a stale/used link: re-resolve from the original URL and retry.
       let lastErr;
       for (let attempt = 0; attempt < 4; attempt++) {
-        try { return send(res, 200, await ff.probe(await resolveSrc(src, attempt > 0))); }
+        try { if (attempt > 0) await resolveSrc(src, true); return send(res, 200, await ff.probe(proxy.srcFor(src))); }
         catch (e) {
           lastErr = e;
           if (!/Server returned (4|5)XX|HTTP error|Server returned 4\d\d|Server returned 5\d\d/i.test(String(e.message))) break;
@@ -211,8 +214,8 @@ const server = http.createServer(async (req, res) => {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
       try {
         const buf = isFrame
-          ? await getFrame(await resolveSrc(b.url), t, clampN(b.h, 144, 1080, 720), !!b.fast, ac.signal)
-          : await getThumb(await resolveSrc(b.url), t, clampN(b.h, 24, 360, 72), ac.signal);
+          ? await getFrame(proxy.srcFor(b.url), t, clampN(b.h, 144, 1080, 720), !!b.fast, ac.signal)
+          : await getThumb(proxy.srcFor(b.url), t, clampN(b.h, 24, 360, 72), ac.signal);
         res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'private, max-age=600' });
         return res.end(buf);
       } catch (e) {
@@ -232,7 +235,7 @@ const server = http.createServer(async (req, res) => {
       previews.set(id, job);
       const t0 = Date.now();
       ff.encodeClip({
-        url: await resolveSrc(b.url), start, end, height: clampN(b.height, 240, 1080, 720), fps: 0, srcFps: 0,
+        url: proxy.srcFor(b.url), start, end, height: clampN(b.height, 240, 1080, 720), fps: 0, srcFps: 0,
         videoKbps: clampN(b.videoKbps, 400, 8000, 3000), audioIndex: clampN(b.audioIndex, 0, 32, 0), subtitle: null, outFile
       }, job).then(() => {
         job.status = 'done'; job.progress = 1;
@@ -269,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       const job = { id, status: 'running', progress: 0, file: outFile, notes: [] };
       jobs.set(id, job);
       ff.encodeClip({
-        url: await resolveSrc(b.url), start, end, height: Number(b.height) || 720, fps: Number(b.fps) || 0, srcFps: Number(b.srcFps) || 0,
+        url: proxy.srcFor(b.url), start, end, height: Number(b.height) || 720, fps: Number(b.fps) || 0, srcFps: Number(b.srcFps) || 0,
         videoKbps: Number(b.videoKbps) || 2000, audioIndex: Number(b.audioIndex) || 0, subtitle: b.subtitle || null, outFile
       }, job).then((r) => {
         job.status = 'done'; job.progress = 1; job.notes = r.notes; job.encoder = r.encoder;

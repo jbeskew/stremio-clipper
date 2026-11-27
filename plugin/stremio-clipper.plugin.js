@@ -470,7 +470,7 @@
     // --- preview window ---
     // Frames come from the helper (/frame) while trimming; playback uses a small preview file the helper
     // encodes for the trimmed range (/preview). Stremio's own player is only used for the very first frame.
-    let closed = false, pxToken = 0, pxTimer = 0, pxId = null, pxUrl = null, zTimer = 0, zKey = '';
+    let closed = false, pxToken = 0, pxTimer = 0, pxId = null, pxRetried = false, pxUrl = null, zTimer = 0, zKey = '';
     let frameBusy = false, frameWant = null;
     const abortAll = new AbortController();
     const frames = new Map();
@@ -697,11 +697,13 @@
         pxUrl = URL.createObjectURL(blob);
         pvid.src = pxUrl; pvid.load(); basePs = ps;
         if (old) URL.revokeObjectURL(old);
+        pxRetried = false;
         S.px = { status: 'ready', ps, pe, progress: 1, msg: '' }; updateBusy();
         if (S.playWhenReady) { S.playWhenReady = false; startVideoPlay(); }
       } catch (e) {
         if (token !== pxToken || closed) return;
         pxId = null;
+        if (!pxRetried) { pxRetried = true; S.px = { status: 'idle', ps: 0, pe: 0, progress: 0, msg: '' }; updateBusy(); scheduleProxy(5000); return; } // one quiet retry (rate limit / stale link)
         S.px = { status: 'error', ps, pe, progress: 0, msg: String((e && e.message) || e).slice(0, 80) };
         S.playWhenReady = false; setPlayIcon(); updateBusy();
       }

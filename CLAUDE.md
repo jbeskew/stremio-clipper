@@ -5,6 +5,7 @@ Twitch-style clip editor for **Stremio Enhanced** (Windows). A scissors button i
 ## Main files
 - `plugin/stremio-clipper.plugin.js`: the Stremio Enhanced plugin (button, overlay UI in a Shadow DOM, size estimates, preview, save flow). Installed copy lives in `%APPDATA%\stremio-enhanced\plugins\`.
 - `helper/server.js`: local HTTP helper on `127.0.0.1:47811` (`/health`, `/probe`, `/thumb`, `/frame`, `/preview`, `/clip`, `/clip/:id`, `/open-folder`, `/copy-file`, `/debug`). Only accepts the Stremio web origin. Set `CLIPPER_EXTRA_ORIGINS` to allow a test origin.
+- `helper/srcproxy.js`: caching range proxy (`GET /src/<key>` on the helper). Every ffmpeg/ffprobe run reads the stream through it, never the debrid CDN directly. 2 MiB chunks cached on disk (`%TEMP%stremio-clipper-cache`, 2 GB LRU, wiped on start), max 2 upstream connections, backoff on 429/5xx, re-resolve on stale link. `/health` `upstream` shows requests/cacheHits/statuses/last429At.
 - `helper/ffmpeg.js`: finds ffmpeg/ffprobe (the Jellyfin build bundled with Stremio; the WinGet one doesn't run), picks the encoder (NVENC, then QSV, AMF, then x264), probes streams, grabs JPEG frames (`grab()`: keyframe-only for the filmstrip, fast keyframe or exact for the preview), encodes clips and burns in subtitles.
 - `helper/start-hidden.vbs`: starts the helper with no console window.
 - `install.ps1` / `uninstall.ps1`: copy the plugin, add or remove the Startup shortcut, start or stop the helper.
